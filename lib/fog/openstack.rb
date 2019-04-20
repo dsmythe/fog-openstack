@@ -107,12 +107,25 @@ module Fog
       url = "#{uri.scheme}://#{uri.host}:#{uri.port}#{path}"
       connection = Fog::Core::Connection.new(url, false, connection_options)
       response = connection.request(
-        :expects => [200, 204, 300],
+        :expects => [200, 204, 300, 404],
         :headers => {'Content-Type' => 'application/json',
                      'Accept'       => 'application/json',
                      'X-Auth-Token' => auth_token},
         :method  => 'GET'
       )
+
+      # We failed to get a normal version endpoint, possibly _very_ old openstack version
+      if response.status == 404 && m = uri.path.match(/^(\/v[0-9.]+\/)/)
+        Fog::Logger.warning("Got 404 from endpoint, trying url segment")
+        connection = Fog::Core::Connection.new("#{uri.scheme}://#{uri.host}:#{uri.port}#{m[1]}", false, connection_options)
+        response = connection.request(
+          :expects => [200, 204, 300],
+          :headers => {'Content-Type' => 'application/json',
+                       'Accept'       => 'application/json',
+                       'X-Auth-Token' => auth_token},
+          :method  => 'GET'
+        )
+      end
 
       body = Fog::JSON.decode(response.body)
 
@@ -122,16 +135,18 @@ module Fog
 
     def self.extract_version_from_body(body, supported_versions)
       versions = []
-      unless body['versions'].nil? || body['versions'].empty?
-        versions = body['versions'].kind_of?(Array) ? body['versions'] : body['versions']['values']
-      end
-      # Some version API would return single endpoint rather than endpoints list, try to get it via 'version'.
-      unless body['version'].nil? or versions.length != 0
-        versions = [body['version']]
-      end
+      # Return nil quickly if the body does not contain versions or version
+      return nil if body['versions'].empty? && body['version'].nil?
       version = nil
 
-      # order is important, preferred status should be first
+      # Some version API would return single endpoint rather than endpoints list, try to get it via 'version'.
+      if !body.key?('versions') && body.key?('version')
+        versions = [body['version']]
+      else
+        versions = body['versions'].kind_of?(Array) ? body['versions'] : body['versions']['values']
+      end)
+
+      # order is important, preffered status should be first
       %w(CURRENT stable SUPPORTED DEPRECATED).each do |status|
         version = versions.find { |x| x['id'].match(supported_versions) && (x['status'] == status) }
         break if version
